@@ -9,14 +9,19 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@supabase/supabase-js": "^2.101.0",
+    "lucide-react": "^1.7.0",
     "next": "16.2.1",
+    "postcss": "^8.5.8",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
+    "@tailwindcss/postcss": "^4.2.2",
     "eslint": "^9",
     "eslint-config-next": "16.2.1",
-    "tailwindcss": "^4"
+    "tailwindcss": "^4.2.2"
   }
 }
