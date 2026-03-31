@@ -4,14 +4,14 @@
 import { useEffect, useRef, useState, use } from 'react';
 import { io } from 'socket.io-client';
 import Editor from '@monaco-editor/react';
-import { Mic, MicOff, Video as VideoIcon, VideoOff, PhoneOff, UserCheck, UserX, Send, LogOut } from 'lucide-react';
+import { Mic, MicOff, Video as VideoIcon, VideoOff, PhoneOff, UserCheck, UserX, Send, LogOut, Ban } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '../../../lib/supabase';
+import toast from 'react-hot-toast';
 
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:5000";
 
 export default function SessionWorkspace({ params }) {
-  // Unwrap params for Next.js 15+ App Router
   const resolvedParams = use(params);
   const roomId = resolvedParams.id;
   
@@ -24,29 +24,25 @@ export default function SessionWorkspace({ params }) {
   const isMaster = role === 'master';
   const hasAdminPrivileges = isHost || isMaster;
 
-  // Connection & Media States
+  // States
   const [socket, setSocket] = useState(null);
   const [code, setCode] = useState("// Waiting to connect...");
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
-  
-  // Waiting Room States
   const [isAdmitted, setIsAdmitted] = useState(hasAdminPrivileges);
   const [joinRequests, setJoinRequests] = useState([]);
   const [partnerSocketId, setPartnerSocketId] = useState(null);
-
-  // Chat States
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
-  const messagesEndRef = useRef(null);
 
-  // WebRTC Refs
+  // Refs
+  const messagesEndRef = useRef(null);
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const peerConnectionRef = useRef(null);
   const localStreamRef = useRef(null);
+  const pendingCandidatesRef = useRef([]); 
 
-  // Auto-scroll chat to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -55,86 +51,143 @@ export default function SessionWorkspace({ params }) {
     const s = io(SOCKET_URL);
     setSocket(s);
 
-    // 1. Join Room Flow
     s.emit('join-room', { roomId, isHost, isMaster, userEmail });
 
-    s.on('join-request', (request) => setJoinRequests(prev => [...prev, request]));
-    s.on('admitted', () => setIsAdmitted(true));
-    s.on('denied', () => { alert("Host denied your request."); router.push('/'); });
-    s.on('room-error', (msg) => { alert(msg); router.push('/'); });
+    // --- Notifications & Room Events ---
+    s.on('notification', (message) => toast.success(message));
+    
+    s.on('join-request', (request) => {
+      toast(`${request.userEmail} is knocking!`, { icon: '🚪' });
+      setJoinRequests(prev => [...prev, request]);
+    });
 
-    // 2. Data Sync
+    s.on('admitted', () => {
+      toast.success("You were admitted to the session!");
+      setIsAdmitted(true);
+    });
+
+    s.on('denied', () => {
+      toast.error("The host denied your entry.");
+      cleanupSession(s);
+      window.location.href = '/'; 
+    });
+
+    s.on('room-error', (msg) => {
+      toast.error(msg);
+      cleanupSession(s);
+      router.push('/');
+    });
+
+    // --- Disconnects & Kicks ---
+    s.on('kicked', () => {
+      toast.error("You have been KICKED from the session.");
+      cleanupSession(s);
+      window.location.href = '/'; 
+    });
+
+    s.on('host-disconnected', () => {
+      toast.error("The Host has ended the session.");
+      cleanupSession(s);
+      window.location.href = '/'; 
+    });
+
+    s.on('user-disconnected', () => {
+      setPartnerSocketId(null);
+      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+      // Rebuild connection to fix "blank video" bug for next joiner
+      rebuildPeerConnection(s);
+    });
+
+    // --- Data Sync ---
     s.on('code-change', (newCode) => setCode(newCode));
     s.on('receive-message', (msg) => setMessages(prev => [...prev, msg]));
-
-    // 3. Host Remote Controls
     s.on('force-execute', (action) => {
       if (action === 'mute') toggleMedia('audio', true);
       if (action === 'video-off') toggleMedia('video', true);
+      toast.error(`Host forced your ${action === 'mute' ? 'microphone' : 'camera'} off.`);
     });
 
-    // 4. WebRTC Initialization
-    const initWebRTC = async () => {
+    // --- WebRTC Logic ---
+    const rebuildPeerConnection = (socketInstance) => {
+      if (peerConnectionRef.current) peerConnectionRef.current.close();
+      pendingCandidatesRef.current = [];
+      
+      const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+      peerConnectionRef.current = pc;
+
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current));
+      }
+
+      pc.ontrack = (event) => {
+        if (remoteVideoRef.current) remoteVideoRef.current.srcObject = event.streams[0];
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) socketInstance.emit('ice-candidate', { target: roomId, candidate: event.candidate });
+      };
+    };
+
+    s.on('user-connected', async (userId) => {
+      setPartnerSocketId(userId);
+      const pc = peerConnectionRef.current;
+      if (!pc) return;
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      s.emit('offer', { target: userId, caller: s.id, sdp: offer });
+    });
+
+    s.on('offer', async (payload) => {
+      setPartnerSocketId(payload.caller);
+      const pc = peerConnectionRef.current;
+      if (!pc) return;
+      await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      s.emit('answer', { target: payload.caller, sdp: answer });
+      while (pendingCandidatesRef.current.length) await pc.addIceCandidate(new RTCIceCandidate(pendingCandidatesRef.current.shift()));
+    });
+
+    s.on('answer', async (payload) => {
+      const pc = peerConnectionRef.current;
+      if (!pc) return;
+      await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+      while (pendingCandidatesRef.current.length) await pc.addIceCandidate(new RTCIceCandidate(pendingCandidatesRef.current.shift()));
+    });
+
+    s.on('ice-candidate', async (candidate) => {
+      const pc = peerConnectionRef.current;
+      if (!pc) return;
+      if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      else pendingCandidatesRef.current.push(candidate);
+    });
+
+    const initMedia = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         localStreamRef.current = stream;
         if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-
-        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-        peerConnectionRef.current = pc;
-        const pendingCandidates = []; 
-
-        stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-        pc.ontrack = (event) => {
-          if (remoteVideoRef.current) remoteVideoRef.current.srcObject = event.streams[0];
-        };
-
-        pc.onicecandidate = (event) => {
-          if (event.candidate) s.emit('ice-candidate', { target: roomId, candidate: event.candidate });
-        };
-
-        s.on('user-connected', async (userId) => {
-          setPartnerSocketId(userId);
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          s.emit('offer', { target: userId, caller: s.id, sdp: offer });
-        });
-
-        s.on('offer', async (payload) => {
-          setPartnerSocketId(payload.caller);
-          await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          s.emit('answer', { target: payload.caller, sdp: answer });
-          while (pendingCandidates.length) await pc.addIceCandidate(new RTCIceCandidate(pendingCandidates.shift()));
-        });
-
-        s.on('answer', async (payload) => {
-          await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-          while (pendingCandidates.length) await pc.addIceCandidate(new RTCIceCandidate(pendingCandidates.shift()));
-        });
-
-        s.on('ice-candidate', async (candidate) => {
-          if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(candidate));
-          else pendingCandidates.push(candidate);
-        });
-
+        rebuildPeerConnection(s);
       } catch (error) {
-        console.error("Mic/Cam error:", error);
+        toast.error("Please allow camera/mic permissions!");
       }
     };
 
-    if (isAdmitted) initWebRTC();
+    if (isAdmitted) initMedia();
 
-    return () => {
-      s.disconnect();
-      localStreamRef.current?.getTracks().forEach(track => track.stop());
-      peerConnectionRef.current?.close();
-    };
-  }, [roomId, isHost, isMaster, isAdmitted, userEmail]);
+    return () => cleanupSession(s);
+  }, [roomId, isHost, isMaster, isAdmitted, userEmail, router]);
 
-  // Actions
+  // --- Utility Functions ---
+  const cleanupSession = (s) => {
+    if (s) s.disconnect();
+    if (localStreamRef.current) localStreamRef.current.getTracks().forEach(track => track.stop());
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+  };
+
   const handleEditorChange = (value) => {
     if (value !== undefined) {
       setCode(value);
@@ -153,10 +206,23 @@ export default function SessionWorkspace({ params }) {
     }
   };
 
-  const handleRequest = (socketId, approved) => {
-    if (approved) socket.emit('admit-user', { roomId, socketId });
-    else socket.emit('deny-user', { socketId });
+  const handleRequest = (socketId, approved, email) => {
+    if (approved) {
+      socket.emit('admit-user', { roomId, socketId });
+      toast.success(`Admitted ${email}`);
+    } else {
+      socket.emit('deny-user', { socketId });
+      toast.error(`Denied ${email}`);
+    }
     setJoinRequests(prev => prev.filter(req => req.socketId !== socketId));
+  };
+
+  const kickUser = () => {
+    if (partnerSocketId && confirm("Are you sure you want to kick this user?")) {
+      socket.emit('kick-user', { targetId: partnerSocketId, roomId });
+      setPartnerSocketId(null);
+      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    }
   };
 
   const forceRemoteAction = (action) => {
@@ -172,20 +238,10 @@ export default function SessionWorkspace({ params }) {
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
-    if (socket) socket.disconnect();
-    if (localStreamRef.current) localStreamRef.current.getTracks().forEach(track => track.stop());
-    if (peerConnectionRef.current) peerConnectionRef.current.close();
-    router.push('/');
+    cleanupSession(socket);
+    window.location.href = '/';
   };
 
-  const leaveSession = () => {
-    if (socket) socket.disconnect();
-    if (localStreamRef.current) localStreamRef.current.getTracks().forEach(track => track.stop());
-    if (peerConnectionRef.current) peerConnectionRef.current.close();
-    router.push('/');
-  };
-
-  // Waiting Room UI
   if (!isAdmitted) {
     return (
       <div className="h-screen w-full bg-slate-950 flex flex-col items-center justify-center text-white">
@@ -196,14 +252,11 @@ export default function SessionWorkspace({ params }) {
     );
   }
 
-  // Main Workspace UI
   return (
     <div className="h-screen w-full bg-[#0f111a] text-white flex flex-col md:flex-row overflow-hidden font-sans">
       
-      {/* LEFT: Editor & Top Nav */}
+      {/* LEFT: Editor */}
       <div className="flex-1 flex flex-col min-w-0 relative border-r border-[#2a2f42]">
-        
-        {/* Workspace Header */}
         <div className="h-14 bg-[#161925] border-b border-[#2a2f42] flex items-center justify-between px-6">
           <div>
             <h1 className="text-sm font-semibold text-slate-200">
@@ -217,54 +270,35 @@ export default function SessionWorkspace({ params }) {
               <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
               <span className="text-xs font-bold tracking-wider">LIVE</span>
             </div>
-            
-            <button 
-              onClick={handleLogout} 
-              className="flex items-center gap-2 text-slate-400 hover:text-rose-400 transition-colors bg-[#0f111a] px-3 py-1 rounded-md border border-[#2a2f42] hover:border-rose-500/30"
-              title="Log Out completely"
-            >
+            <button onClick={handleLogout} className="flex items-center gap-2 text-slate-400 hover:text-rose-400 transition-colors bg-[#0f111a] px-3 py-1 rounded-md border border-[#2a2f42]">
               <LogOut size={16} />
               <span className="text-xs font-bold tracking-wider hidden sm:inline">LOGOUT</span>
             </button>
           </div>
         </div>
 
-        {/* Join Requests Notification */}
         {hasAdminPrivileges && joinRequests.length > 0 && (
           <div className="absolute top-16 right-4 z-50 w-80 space-y-2">
             {joinRequests.map((req) => (
               <div key={req.socketId} className="bg-slate-800 border border-slate-700 p-4 rounded-xl shadow-2xl flex flex-col gap-3">
                 <p className="text-sm"><strong>{req.userEmail}</strong> wants to join.</p>
                 <div className="flex gap-2">
-                  <button onClick={() => handleRequest(req.socketId, true)} className="flex-1 bg-emerald-600 py-1.5 rounded-lg text-sm font-medium hover:bg-emerald-500 flex items-center justify-center">
-                    <UserCheck size={16} className="mr-1"/> Admit
-                  </button>
-                  <button onClick={() => handleRequest(req.socketId, false)} className="flex-1 bg-rose-600 py-1.5 rounded-lg text-sm font-medium hover:bg-rose-500 flex items-center justify-center">
-                    <UserX size={16} className="mr-1"/> Deny
-                  </button>
+                  <button onClick={() => handleRequest(req.socketId, true, req.userEmail)} className="flex-1 bg-emerald-600 py-1.5 rounded-lg text-sm font-medium hover:bg-emerald-500 flex justify-center items-center"><UserCheck size={16} className="mr-1"/> Admit</button>
+                  <button onClick={() => handleRequest(req.socketId, false, req.userEmail)} className="flex-1 bg-rose-600 py-1.5 rounded-lg text-sm font-medium hover:bg-rose-500 flex justify-center items-center"><UserX size={16} className="mr-1"/> Deny</button>
                 </div>
               </div>
             ))}
           </div>
         )}
         
-        {/* Editor Container */}
         <div className="flex-1 bg-[#0f111a]">
-          <Editor 
-            height="100%" 
-            defaultLanguage="javascript" 
-            theme="vs-dark" 
-            value={code} 
-            onChange={handleEditorChange} 
-            options={{ minimap: { enabled: false }, fontSize: 15, padding: { top: 20 } }} 
-          />
+          <Editor height="100%" defaultLanguage="javascript" theme="vs-dark" value={code} onChange={handleEditorChange} options={{ minimap: { enabled: false }, fontSize: 15, padding: { top: 20 } }} />
         </div>
       </div>
 
-      {/* RIGHT: Video, Chat & Controls */}
+      {/* RIGHT: Video & Chat */}
       <div className="w-full md:w-[380px] flex flex-col bg-[#161925] shrink-0 h-screen">
         
-        {/* Videos Section */}
         <div className="p-4 space-y-3 shrink-0">
           <div className="relative w-full aspect-video bg-[#0f111a] rounded-lg overflow-hidden border border-[#2a2f42] group">
             <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
@@ -272,12 +306,9 @@ export default function SessionWorkspace({ params }) {
             
             {hasAdminPrivileges && partnerSocketId && (
               <div className="absolute top-2 right-2 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button onClick={() => forceRemoteAction('mute')} className="bg-red-500/80 hover:bg-red-500 p-1.5 rounded text-xs font-bold shadow backdrop-blur-sm" title="Force Mute Partner">
-                  <MicOff size={14}/>
-                </button>
-                <button onClick={() => forceRemoteAction('video-off')} className="bg-red-500/80 hover:bg-red-500 p-1.5 rounded text-xs font-bold shadow backdrop-blur-sm" title="Force Video Off Partner">
-                  <VideoOff size={14}/>
-                </button>
+                <button onClick={() => forceRemoteAction('mute')} className="bg-red-500/80 hover:bg-red-500 p-1.5 rounded text-xs font-bold shadow" title="Force Mute"><MicOff size={14}/></button>
+                <button onClick={() => forceRemoteAction('video-off')} className="bg-red-500/80 hover:bg-red-500 p-1.5 rounded text-xs font-bold shadow" title="Force Video Off"><VideoOff size={14}/></button>
+                <button onClick={kickUser} className="bg-rose-700/90 hover:bg-rose-600 p-1.5 rounded text-xs font-bold shadow" title="Kick User"><Ban size={14}/></button>
               </div>
             )}
           </div>
@@ -288,10 +319,9 @@ export default function SessionWorkspace({ params }) {
           </div>
         </div>
 
-        {/* Chat Section */}
         <div className="flex-1 flex flex-col border-t border-[#2a2f42] min-h-0 bg-[#0f111a]">
-          <div className="px-4 py-2 bg-[#161925] border-b border-[#2a2f42] text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center justify-between">
-            <span>Session Chat</span>
+          <div className="px-4 py-2 bg-[#161925] border-b border-[#2a2f42] text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+            Session Chat
           </div>
           
           <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
@@ -299,14 +329,8 @@ export default function SessionWorkspace({ params }) {
               const isMe = msg.senderEmail === userEmail;
               return (
                 <div key={idx} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                  <span className="text-[10px] text-slate-500 mb-1 px-1">
-                    {msg.senderEmail.split('@')[0]} • {msg.timestamp}
-                  </span>
-                  <div className={`px-3 py-2 text-sm max-w-[85%] break-words shadow-sm ${
-                    isMe 
-                      ? 'bg-emerald-600 text-white rounded-2xl rounded-tr-sm' 
-                      : 'bg-[#161925] text-slate-200 rounded-2xl rounded-tl-sm border border-[#2a2f42]'
-                  }`}>
+                  <span className="text-[10px] text-slate-500 mb-1 px-1">{msg.senderEmail.split('@')[0]} • {msg.timestamp}</span>
+                  <div className={`px-3 py-2 text-sm max-w-[85%] break-words shadow-sm ${isMe ? 'bg-emerald-600 text-white rounded-2xl rounded-tr-sm' : 'bg-[#161925] text-slate-200 rounded-2xl rounded-tl-sm border border-[#2a2f42]'}`}>
                     {msg.text}
                   </div>
                 </div>
@@ -315,36 +339,16 @@ export default function SessionWorkspace({ params }) {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Chat Input */}
           <form onSubmit={sendChatMessage} className="p-3 bg-[#161925] border-t border-[#2a2f42] flex gap-2">
-            <input
-              type="text"
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              placeholder="Message..."
-              className="flex-1 bg-[#0f111a] border border-[#2a2f42] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 text-slate-200 transition-colors"
-            />
-            <button 
-              type="submit" 
-              className="p-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg transition-colors disabled:opacity-50 disabled:hover:bg-emerald-600" 
-              disabled={!chatInput.trim()}
-            >
-              <Send size={18} />
-            </button>
+            <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="Message..." className="flex-1 bg-[#0f111a] border border-[#2a2f42] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 text-slate-200 transition-colors" />
+            <button type="submit" className="p-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg transition-colors disabled:opacity-50" disabled={!chatInput.trim()}><Send size={18} /></button>
           </form>
         </div>
 
-        {/* Local Call Controls */}
         <div className="p-4 bg-[#161925] border-t border-[#2a2f42] flex justify-center gap-4 shrink-0">
-          <button onClick={() => toggleMedia('audio')} className={`p-3 rounded-full transition-all duration-200 ${isMuted ? 'bg-rose-500 shadow-lg shadow-rose-500/20' : 'bg-[#2a2f42] hover:bg-[#32384e]'}`}>
-            {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
-          </button>
-          <button onClick={() => toggleMedia('video')} className={`p-3 rounded-full transition-all duration-200 ${isVideoOff ? 'bg-rose-500 shadow-lg shadow-rose-500/20' : 'bg-[#2a2f42] hover:bg-[#32384e]'}`}>
-            {isVideoOff ? <VideoOff size={20} /> : <VideoIcon size={20} />}
-          </button>
-          <button onClick={leaveSession} className="p-3 bg-rose-600 hover:bg-rose-500 rounded-full transition-all duration-200 shadow-lg shadow-rose-600/20" title="Leave call">
-            <PhoneOff size={20} />
-          </button>
+          <button onClick={() => toggleMedia('audio')} className={`p-3 rounded-full transition-all duration-200 ${isMuted ? 'bg-rose-500 shadow-lg shadow-rose-500/20' : 'bg-[#2a2f42] hover:bg-[#32384e]'}`}>{isMuted ? <MicOff size={20} /> : <Mic size={20} />}</button>
+          <button onClick={() => toggleMedia('video')} className={`p-3 rounded-full transition-all duration-200 ${isVideoOff ? 'bg-rose-500 shadow-lg shadow-rose-500/20' : 'bg-[#2a2f42] hover:bg-[#32384e]'}`}>{isVideoOff ? <VideoOff size={20} /> : <VideoIcon size={20} />}</button>
+          <button onClick={() => { cleanupSession(socket); window.location.href = '/'; }} className="p-3 bg-rose-600 hover:bg-rose-500 rounded-full transition-all duration-200 shadow-lg shadow-rose-600/20" title="Leave call"><PhoneOff size={20} /></button>
         </div>
       </div>
     </div>

@@ -1,3 +1,4 @@
+// frontend/app/about/page.jsx
 import Link from 'next/link';
 import { Code2, Video, ShieldCheck, Zap, Users, MessageSquare, ArrowLeft } from 'lucide-react';
 
@@ -13,7 +14,7 @@ export default function AboutPage() {
 
   return (
     <div className="min-h-screen bg-[#0f111a] text-slate-200 font-sans">
-      <nav className="border-b border-[#2a2f42] bg-[#161925] sticky top-0 z-50">
+      <nav className="border-b border-[#2a2f42] bg-[#161925] sticky top-0 z-50 shadow-sm">
         <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="p-1.5 bg-emerald-500/10 rounded-lg border border-emerald-500/20">
@@ -21,7 +22,7 @@ export default function AboutPage() {
             </div>
             <span className="font-bold text-lg tracking-wide text-white">MentorSpace</span>
           </div>
-          <Link href="/" className="flex items-center gap-2 text-sm font-medium text-slate-400 hover:text-emerald-400 transition-colors bg-[#0f111a] px-3 py-1.5 rounded-lg border border-[#2a2f42]">
+          <Link href="/" className="flex items-center gap-2 text-sm font-medium text-slate-400 hover:text-emerald-400 transition-colors bg-[#0f111a] px-3 py-1.5 rounded-lg border border-[#2a2f42] hover:border-emerald-500/30">
             <ArrowLeft size={16} /> Back to App
           </Link>
         </div>
@@ -39,8 +40,8 @@ export default function AboutPage() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {features.map((f, i) => (
-            <div key={i} className="bg-[#161925] border border-[#2a2f42] p-8 rounded-2xl hover:border-emerald-500/50 transition-colors group">
-              <div className="mb-4 p-3 bg-[#0f111a] inline-block rounded-xl border border-[#2a2f42] group-hover:scale-110 transition-transform shadow-lg">
+            <div key={i} className="bg-[#161925] border border-[#2a2f42] p-8 rounded-2xl hover:border-emerald-500/50 transition-all duration-300 group shadow-lg">
+              <div className="mb-4 p-3 bg-[#0f111a] inline-block rounded-xl border border-[#2a2f42] group-hover:scale-110 transition-transform shadow-md">
                 {f.icon}
               </div>
               <h3 className="text-xl font-bold text-white mb-2">{f.title}</h3>

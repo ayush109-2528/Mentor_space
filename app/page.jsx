@@ -1,3 +1,4 @@
+// frontend/app/page.jsx
 "use client";
 
 import { useState, useEffect } from 'react';
@@ -14,6 +15,7 @@ export default function Home() {
   const [user, setUser] = useState(null);
   const router = useRouter();
 
+  // Check auth state on load and listen for changes
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user || null);
@@ -42,6 +44,7 @@ export default function Home() {
     await supabase.auth.signOut();
   };
 
+  // Check if logged-in user matches the Master email from .env.local
   const isMasterUser = user?.email === process.env.NEXT_PUBLIC_MASTER_EMAIL;
 
   const handleJoin = (role) => {
@@ -55,7 +58,7 @@ export default function Home() {
       
       {/* Link to About Page */}
       <div className="absolute top-6 right-6">
-        <Link href="/about" className="flex items-center gap-2 text-slate-400 hover:text-emerald-400 transition-colors text-sm font-medium bg-[#161925] px-4 py-2 rounded-full border border-[#2a2f42]">
+        <Link href="/about" className="flex items-center gap-2 text-slate-400 hover:text-emerald-400 transition-colors text-sm font-medium bg-[#161925] px-4 py-2 rounded-full border border-[#2a2f42] shadow-lg">
           <Info size={16} /> How it works
         </Link>
       </div>
@@ -71,14 +74,15 @@ export default function Home() {
         <p className="text-slate-400 text-center text-sm mb-8">Professional 1-on-1 coding environments</p>
 
         {!user ? (
+          // --- AUTHENTICATION FORM ---
           <form onSubmit={handleAuth} className="space-y-4 mt-4">
             <input
               type="email" placeholder="Email address" value={email} onChange={(e) => setEmail(e.target.value)} required
-              className="w-full px-4 py-3 bg-[#0f111a] border border-[#2a2f42] rounded-xl focus:border-emerald-500 focus:outline-none text-slate-200"
+              className="w-full px-4 py-3 bg-[#0f111a] border border-[#2a2f42] rounded-xl focus:border-emerald-500 focus:outline-none text-slate-200 transition-colors"
             />
             <input
               type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required
-              className="w-full px-4 py-3 bg-[#0f111a] border border-[#2a2f42] rounded-xl focus:border-emerald-500 focus:outline-none text-slate-200"
+              className="w-full px-4 py-3 bg-[#0f111a] border border-[#2a2f42] rounded-xl focus:border-emerald-500 focus:outline-none text-slate-200 transition-colors"
             />
             <button type="submit" className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 font-semibold rounded-xl transition-all shadow-lg shadow-emerald-900/20 mt-2">
               {isLoginMode ? "Log In" : "Create Account"}
@@ -88,20 +92,24 @@ export default function Home() {
             </p>
           </form>
         ) : (
+          // --- SESSION JOIN FORM ---
           <div className="space-y-4 mt-4">
+            {/* User Profile Banner */}
             <div className="flex justify-between items-center bg-[#0f111a] border border-[#2a2f42] p-3 rounded-xl mb-6">
               <span className="text-xs text-slate-300 truncate pr-4 font-medium">
                 {user.email} 
                 {isMasterUser && <span className="ml-2 bg-rose-500 text-white px-2 py-0.5 rounded text-[10px] font-bold tracking-wider">MASTER</span>}
               </span>
-              <button onClick={handleLogout} className="text-rose-400 hover:text-rose-300 p-1 bg-rose-500/10 rounded-lg transition-colors"><LogOut size={16}/></button>
+              <button onClick={handleLogout} className="text-rose-400 hover:text-rose-300 p-1.5 bg-rose-500/10 rounded-lg transition-colors" title="Log out">
+                <LogOut size={16}/>
+              </button>
             </div>
 
             <div className="space-y-1">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Workspace ID</label>
               <input
                 type="text" placeholder="e.g. react-123" value={roomId} onChange={(e) => setRoomId(e.target.value)}
-                className="w-full px-4 py-3 bg-[#0f111a] border border-[#2a2f42] rounded-xl focus:border-emerald-500 focus:outline-none text-slate-200"
+                className="w-full px-4 py-3 bg-[#0f111a] border border-[#2a2f42] rounded-xl focus:border-emerald-500 focus:outline-none text-slate-200 transition-colors"
               />
             </div>
             
@@ -115,6 +123,7 @@ export default function Home() {
                 </button>
               </div>
               
+              {/* MASTER OVERRIDE BUTTON */}
               {isMasterUser && (
                 <button onClick={() => handleJoin('master')} className="w-full py-3 bg-rose-600 hover:bg-rose-500 font-bold tracking-wider rounded-xl transition-all text-sm shadow-lg shadow-rose-900/20 mt-2">
                   OVERRIDE AS MASTER
